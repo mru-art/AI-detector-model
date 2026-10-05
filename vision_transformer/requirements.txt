@@ -1,0 +1,10 @@
+# Install PyTorch FIRST with CUDA support (plain `pip install torch` gives a CPU-only build on Windows):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# then:  pip install -r requirements.txt
+numpy
+pillow
+scikit-learn
+matplotlib
+seaborn
+tqdm
+tensorboard
