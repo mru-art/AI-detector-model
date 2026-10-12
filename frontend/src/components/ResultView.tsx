@@ -28,7 +28,7 @@ export default function ResultView({ url, fileName, result }: Props) {
               {result.regions.map((r, i) => (
                 <div
                   key={i}
-                  className="absolute rounded-sm border-2 border-white bg-ink/35 outline outline-2 outline-ink"
+                  className="absolute rounded-sm border-2 border-white bg-black/35 outline outline-2 outline-black"
                   style={{
                     left: `${r.x * 100}%`,
                     top: `${r.y * 100}%`,

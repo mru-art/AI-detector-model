@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
+import ThemeToggle from "@/components/ThemeToggle";
+
 const LINKS = [
   { to: "/", label: "Home", end: true },
   { to: "/analyze", label: "Analyze" },
-  { to: "/method", label: "Method" },
-  { to: "/privacy", label: "Privacy" },
+  { to: "/dashboard", label: "Dashboard" },
 ];
 
 function MenuPill() {
@@ -80,6 +81,7 @@ export default function AppShell() {
   return (
     <div className="min-h-svh">
       <MenuPill />
+      <ThemeToggle />
       <main className="mx-auto w-full max-w-[1400px] px-5 pb-24 pt-28 sm:px-8">
         <Outlet />
       </main>
