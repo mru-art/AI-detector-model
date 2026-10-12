@@ -1,0 +1,18 @@
+# dependencies and build output
+node_modules
+dist
+
+# secrets and local config (never commit these)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# macOS and editor junk
+.DS_Store
+.vscode/
+.idea/
+
+# logs
+*.log

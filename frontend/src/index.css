@@ -1,0 +1,43 @@
+@import "@fontsource/anton/400.css";
+@import "@fontsource-variable/inter";
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Anton", "Arial Narrow", Impact, sans-serif;
+  --font-sans: "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --color-ink: #1b1a1e;
+  --color-paper: #ffffff;
+  --color-mist: #f4f4f5;
+  --color-line: #e4e4e7;
+  --color-muted: #71717a;
+}
+
+html {
+  scroll-padding-top: env(safe-area-inset-top, 0px);
+  overflow-x: clip;
+  overscroll-behavior-x: none;
+}
+
+body {
+  margin: 0;
+  overflow-x: clip;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-ink);
+  outline-offset: 2px;
+}
+
+@keyframes scram-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
