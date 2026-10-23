@@ -4,11 +4,15 @@ __pycache__/
 # Datasets
 dataset/
 dataset_v2/
+dataset_CL/
 
 # Trained models / checkpoints
 models/
 
 # Training runs / logs
 runs/
+
+
+*.pth
 
 README.md
