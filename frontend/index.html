@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="S.C.R.A.M: Spectral Classification, Replay and Art Masking. Check whether an image is likely real or AI-generated." />
+    <title>S.C.R.A.M</title>
+    <script>
+      // Set the theme before the page paints so there is no light flash in dark mode.
+      try {
+        var saved = localStorage.getItem("scram-theme");
+        var dark = saved ? saved === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+        if (dark) document.documentElement.classList.add("dark");
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

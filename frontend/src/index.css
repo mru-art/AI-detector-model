@@ -1,0 +1,64 @@
+@import "@fontsource/anton/400.css";
+@import "@fontsource-variable/inter";
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Anton", "Arial Narrow", Impact, sans-serif;
+  --font-sans: "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* Colors are CSS variables so the whole site switches theme by swapping them. */
+@theme inline {
+  --color-ink: var(--ink);
+  --color-paper: var(--paper);
+  --color-mist: var(--mist);
+  --color-line: var(--line);
+  --color-muted: var(--muted);
+}
+
+:root {
+  --ink: #1b1a1e;
+  --paper: #ffffff;
+  --mist: #f4f4f5;
+  --line: #e4e4e7;
+  --muted: #63636b;
+  color-scheme: light;
+}
+
+:root.dark {
+  --ink: #f4f4f5;
+  --paper: #0e0e10;
+  --mist: #1a1a1d;
+  --line: #2c2c31;
+  --muted: #a1a1aa;
+  color-scheme: dark;
+}
+
+html {
+  scroll-padding-top: env(safe-area-inset-top, 0px);
+  overflow-x: clip;
+  overscroll-behavior-x: none;
+}
+
+body {
+  margin: 0;
+  overflow-x: clip;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+@keyframes scram-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
