@@ -12,4 +12,7 @@ models/
 # Training runs / logs
 runs/
 
+
+*.pth
+
 README.md

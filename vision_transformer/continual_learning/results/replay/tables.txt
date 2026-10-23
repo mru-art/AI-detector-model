@@ -1,0 +1,22 @@
+
+6-way accuracy per class (did it name the exact source?)
+              after E1  after E2  after E3  after E4  after E5
+real             99.8%     99.7%     97.5%     97.2%     97.5%
+dalle3           98.1%     97.9%     97.4%     96.0%     95.4%
+midjourney           -     85.4%     84.0%     85.3%     82.4%
+sd21                 -         -     86.7%     78.5%     72.7%
+sd3                  -         -         -     69.6%     66.1%
+sdxl                 -         -         -         -     71.0%
+AVERAGE          99.0%     94.3%     91.4%     85.3%     80.9%
+
+Real-vs-AI accuracy per class (real called real / generator called AI)
+              after E1  after E2  after E3  after E4  after E5
+real             99.8%     99.7%     97.5%     97.2%     97.5%
+dalle3           98.1%     97.9%     97.8%     96.5%     95.7%
+midjourney           -     86.1%     90.5%     89.2%     85.9%
+sd21                 -         -     86.8%     86.0%     82.4%
+sd3                  -         -         -     83.3%     80.4%
+sdxl                 -         -         -         -     83.2%
+AVERAGE          99.0%     94.5%     93.2%     90.4%     87.5%
+
+SUMMARY: {'final_avg_acc': 0.8085333333333332, 'final_macro_f1': 0.8135137600990469, 'final_avg_real_vs_ai': 0.8752, 'final_forgetting': 0.058033333333333326, 'final_backward_transfer': -0.058033333333333326}
