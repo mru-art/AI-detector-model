@@ -16,3 +16,7 @@ runs/
 *.pth
 
 README.md
+
+local_dev/.env
+
+local_dev/.env
