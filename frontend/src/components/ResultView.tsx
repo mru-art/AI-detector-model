@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { AlertTriangle, Eye, EyeOff } from "lucide-react";
 
-import type { AnalysisResult } from "@/lib/analysis";
+import { MODEL_CONNECTED, type AnalysisResult } from "@/lib/analysis";
 
 type Props = {
   url: string;
@@ -52,6 +52,16 @@ export default function ResultView({ url, fileName, result }: Props) {
             <p>
               <strong>Mock result.</strong> The detector isn’t connected yet, so this is not a real
               prediction.
+            </p>
+          </div>
+        )}
+
+        {!result.isMock && !MODEL_CONNECTED && (
+          <div className="flex items-start gap-3 rounded-md border border-ink p-4 text-sm">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <p>
+              <strong>Preview.</strong> This result comes from our server, but the trained model
+              isn’t connected yet, so every image gets the same placeholder result.
             </p>
           </div>
         )}

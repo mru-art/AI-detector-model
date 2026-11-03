@@ -1,28 +1,21 @@
-// Local-only Vite config (excluded from git via .git/info/exclude).
+// Local dev config: run the frontend against a backend on this PC.
 // Run:  npx vite --config vite.config.local.ts
 //
+// * Turns off mock mode and sends API calls to /api.
 // * Proxies /api/* to the FastAPI backend, so the browser never hits CORS.
-// * Swaps "@/lib/analysis" for local_dev/frontend/analysis.ts, which calls
-//   the real /detect endpoint, without touching the repo's source.
-import { fileURLToPath, URL } from "node:url";
 import { defineConfig, mergeConfig } from "vite";
 import base from "./vite.config";
 
 const backend = process.env.BACKEND_URL ?? "http://localhost:8000";
 
+// Vite reads VITE_* variables from process.env after loading this file.
+process.env.VITE_USE_MOCK ??= "false";
+process.env.VITE_API_BASE_URL ??= "/api";
+
 export default mergeConfig(
   base,
   defineConfig({
-    resolve: {
-      alias: [
-        {
-          find: /^@\/lib\/analysis$/,
-          replacement: fileURLToPath(new URL("../local_dev/frontend/analysis.ts", import.meta.url)),
-        },
-      ],
-    },
     server: {
-      fs: { allow: [".."] },
       proxy: {
         "/api": {
           target: backend,
