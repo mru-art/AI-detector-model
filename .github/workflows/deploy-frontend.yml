@@ -34,6 +34,9 @@ jobs:
       - run: npm run build
         env:
           VITE_BASE: /${{ github.event.repository.name }}/
+          # Use the hosted backend instead of mock results.
+          VITE_USE_MOCK: "false"
+          VITE_API_BASE_URL: https://scram-backend.onrender.com
       # GitHub Pages has no single-page-app fallback, so a refresh on /analyze would 404.
       # Serving the same page as 404.html makes deep links work.
       - run: cp dist/index.html dist/404.html

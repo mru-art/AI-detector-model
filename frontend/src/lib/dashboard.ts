@@ -1,5 +1,3 @@
-import { USE_MOCK } from "@/lib/analysis";
-
 // Our own shape for the dashboard. The backend contract isn't agreed yet,
 // so this is where an adapter goes once it is.
 
@@ -128,6 +126,7 @@ async function mockDashboard(signal?: AbortSignal): Promise<DashboardData> {
 }
 
 export async function fetchDashboard(signal?: AbortSignal): Promise<DashboardData> {
-  if (USE_MOCK) return mockDashboard(signal);
-  throw new Error("The dashboard API isn’t connected yet.");
+  // The backend has no endpoint for the accuracy matrix yet, so the dashboard
+  // keeps its demo data even when the Analyze page uses the real backend.
+  return mockDashboard(signal);
 }
