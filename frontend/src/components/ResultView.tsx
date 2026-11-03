@@ -13,6 +13,9 @@ export default function ResultView({ url, fileName, result }: Props) {
   const [showFlags, setShowFlags] = useState(true);
   const isAi = result.verdict === "ai";
   const hasRegions = result.regions.length > 0;
+    // The real detector doesn't return regions yet. Say so instead of showing "0",
+  // which would read as "nothing suspicious found".
+  const regionsPending = !result.isMock && !hasRegions;
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1.6fr)_minmax(300px,1fr)]">
@@ -72,8 +75,17 @@ export default function ResultView({ url, fileName, result }: Props) {
               </>
             )}
             <dt className="text-muted">Flagged regions</dt>
-            <dd className="text-right font-bold tabular-nums">{result.regions.length}</dd>
+            <dd className="text-right font-bold tabular-nums">
+              {regionsPending ? "Feature in Progress" : result.regions.length}
+            </dd>
           </dl>
+
+          {regionsPending && (
+            <p className="mt-4 text-sm text-muted">
+              Disclaimer: Highlighting the parts of the image that influenced this result will be added in an
+              upcoming update.
+            </p>
+          )}
 
           {hasRegions && (
             <button

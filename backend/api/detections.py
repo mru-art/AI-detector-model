@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_session
@@ -41,27 +42,35 @@ async def detect(
         if not content:
             raise HTTPException(status_code=422, detail="Uploaded file is empty")
 
-        key = f"{uuid4().hex}/{file.filename}"
-        try:
-            await storage.put_object(
-                bucket=ORIGINALS_BUCKET,
-                key=key,
-                body=content,
-                content_type=file.content_type,
-            )
-        except (BotoCoreError, ClientError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Object storage is unavailable",
-            ) from exc
-
-        artwork = Artwork(
-            artist_id=artist_id,
-            original_uri=f"s3://{ORIGINALS_BUCKET}/{key}",
-            sha256=sha256(content).hexdigest(),
+        # Artwork.sha256 is unique, so an image that was uploaded before can't be
+        # stored again. Reuse the existing artwork and just run detection again.
+        checksum = sha256(content).hexdigest()
+        artwork = await session.scalar(
+            select(Artwork).where(Artwork.sha256 == checksum)
         )
-        session.add(artwork)
-        await session.flush()
+
+        if artwork is None:
+            key = f"{uuid4().hex}/{file.filename}"
+            try:
+                await storage.put_object(
+                    bucket=ORIGINALS_BUCKET,
+                    key=key,
+                    body=content,
+                    content_type=file.content_type,
+                )
+            except (BotoCoreError, ClientError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Object storage is unavailable",
+                ) from exc
+
+            artwork = Artwork(
+                artist_id=artist_id,
+                original_uri=f"s3://{ORIGINALS_BUCKET}/{key}",
+                sha256=checksum,
+            )
+            session.add(artwork)
+            await session.flush()
 
     # Replace this stub with the inference service call.
     result = {
