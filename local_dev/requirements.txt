@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+sqlalchemy[asyncio]
+asyncpg
+aioboto3
+pydantic
+pillow
+numpy
+scikit-image
