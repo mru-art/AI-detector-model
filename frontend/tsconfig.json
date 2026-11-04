@@ -29,5 +29,9 @@
   "include": [
     "src",
     "vite.config.ts"
+  ],
+  "exclude": [
+    "src/pages/CL-Dashboard.tsx",
+    "src/components/artwork-inspector.tsx"
   ]
 }
