@@ -1,10 +1,15 @@
+# PyTorch first (GPU build, see https://pytorch.org/get-started/locally/), e.g.
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 fastapi
 uvicorn[standard]
 python-multipart
-sqlalchemy[asyncio]
-asyncpg
-aioboto3
 pydantic
 pillow
 numpy
-scikit-image
+sqlalchemy[asyncio]
+aiosqlite          # history in SQLite (DATABASE_URL=sqlite+aiosqlite:///./scram.db)
+# Optional extras:
+# asyncpg          # Postgres
+# aioboto3         # S3 / MinIO storage
+# scikit-image     # backend/services/protection.py
+# kagglehub huggingface_hub pyzipper   # vision_transformer/art_datasets.py downloads

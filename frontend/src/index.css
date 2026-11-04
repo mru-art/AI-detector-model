@@ -1,43 +1,55 @@
-@import "@fontsource/anton/400.css";
-@import "@fontsource-variable/inter";
+@import "@fontsource-variable/bricolage-grotesque";
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
-  --font-display: "Anton", "Arial Narrow", Impact, sans-serif;
-  --font-sans: "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-sans: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-/* Colors are CSS variables so the whole site switches theme by swapping them. */
+/* Colours are CSS variables so the whole site switches theme by swapping them.
+   human / ai are a validated colour-blind-safe pair (ultramarine and alizarin crimson). */
 @theme inline {
-  --color-ink: var(--ink);
   --color-paper: var(--paper);
-  --color-mist: var(--mist);
-  --color-line: var(--line);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-ink: var(--ink);
   --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-human: var(--human);
+  --color-ai: var(--ai);
+  --color-warn: var(--warn);
 }
 
 :root {
-  --ink: #1b1a1e;
-  --paper: #ffffff;
-  --mist: #f4f4f5;
-  --line: #e4e4e7;
-  --muted: #63636b;
+  --paper: #f6f6f3;
+  --surface: #ffffff;
+  --sunken: #ecece8;
+  --ink: #1a1c22;
+  --muted: #5d616b;
+  --line: #dcddd8;
+  --human: #2d45b5;
+  --ai: #b4283c;
+  --warn: #8a5a00;
   color-scheme: light;
 }
 
 :root.dark {
-  --ink: #f4f4f5;
-  --paper: #0e0e10;
-  --mist: #1a1a1d;
-  --line: #2c2c31;
-  --muted: #a1a1aa;
+  --paper: #121318;
+  --surface: #1b1d23;
+  --sunken: #0d0e12;
+  --ink: #ecedef;
+  --muted: #9ea2ac;
+  --line: #2d3038;
+  --human: #6b82e8;
+  --ai: #e45c6e;
+  --warn: #e0b04f;
   color-scheme: dark;
 }
 
 html {
-  scroll-padding-top: env(safe-area-inset-top, 0px);
   overflow-x: clip;
-  overscroll-behavior-x: none;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
@@ -46,19 +58,42 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-sans);
+  font-size: 1.0625rem;
+  line-height: 1.55;
+  font-optical-sizing: auto;
   -webkit-font-smoothing: antialiased;
 }
 
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+  font-optical-sizing: auto;
+}
+
+p {
+  text-wrap: pretty;
+}
+
 :focus-visible {
-  outline: 2px solid var(--ink);
+  outline: 2px solid var(--human);
   outline-offset: 2px;
 }
 
-@keyframes scram-slide {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(350%); }
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The scan line that sweeps the artwork while it's being analysed. */
+@keyframes scram-scan {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100%); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

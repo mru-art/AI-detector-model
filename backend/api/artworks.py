@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_session
 from ..models import Artwork
-from ..schemas import ArtworkDetailResponse, ArtworkResponse
+from .schemas import ArtworkDetailResponse, ArtworkResponse
 from ..storage import storage
 
 router = APIRouter(prefix="/artworks", tags=["artworks"])

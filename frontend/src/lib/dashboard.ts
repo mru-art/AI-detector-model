@@ -1,132 +1,57 @@
-// Our own shape for the dashboard. The backend contract isn't agreed yet,
-// so this is where an adapter goes once it is.
+import { USE_MOCK, request } from "@/lib/api";
+import snapshot from "@/data/metrics-snapshot.json";
 
-export type Column = {
+/** Response of GET /metrics/continual (backend/metrics.py). Accuracies are 0–1; null = not learned yet. */
+export type Metrics = {
+  method: string;
+  method_label: string;
+  smoke_test: boolean;
+  methods: { id: string; label: string; smoke: boolean }[];
+  classes: { id: string; label: string }[];
+  experiences: { id: string; generator: string; label: string }[];
+  acc: (number | null)[][];
+  ai_det: (number | null)[][];
+  avg_acc: number[];
+  avg_ai_det: number[];
+  forgetting: (number | null)[];
+  summary: Record<string, number | null>;
+};
+
+export type MetricsResult = { data: Metrics; live: boolean };
+
+/**
+ * Live numbers from the API; if it can't be reached, the snapshot exported from the
+ * repo's results (python -m backend.metrics > frontend/src/data/metrics-snapshot.json).
+ */
+export async function fetchMetrics(method: string | null, signal?: AbortSignal): Promise<MetricsResult> {
+  if (!USE_MOCK) {
+    try {
+      const q = method ? `?method=${encodeURIComponent(method)}` : "";
+      return { data: await request<Metrics>(`/metrics/continual${q}`, { signal }), live: true };
+    } catch (err) {
+      if ((err as Error).name === "AbortError") throw err;
+    }
+  }
+  return { data: snapshot as Metrics, live: false };
+}
+
+export type GeneratorSummary = {
   id: string;
   label: string;
-  /** real = real images, generator = trained generator, heldout = never trained on */
-  kind: "real" | "generator" | "heldout";
-};
-
-export type Experience = {
-  id: string;
-  generator: string;
-  /** which column this experience trains */
-  columnId: string;
-};
-
-export type DashboardData = {
-  columns: Column[];
-  experiences: Experience[];
-  /** matrix[row][col]: accuracy (0–100) after experience `row`, on column `col` */
-  matrix: number[][];
-  /** True while the numbers are made up locally, not from the model. */
-  isMock: boolean;
-};
-
-export type ExperienceSummary = {
-  id: string;
-  generator: string;
+  experience: string;
   learned: number;
   now: number;
   change: number;
 };
 
-export type Summary = {
-  averageAccuracy: number;
-  heldOut: { label: string; accuracy: number } | null;
-  /** Backward transfer: average change on earlier generators. Negative = forgetting. */
-  bwt: number | null;
-  perExperience: ExperienceSummary[];
-};
-
-const mean = (values: number[]): number =>
-  values.reduce((sum, v) => sum + v, 0) / values.length;
-
-/** Has the model been trained on column `col` by the time of row `row`? */
-export function isTrained(data: DashboardData, row: number, col: number): boolean {
-  const column = data.columns[col];
-  if (column.kind === "real") return true;
-  if (column.kind === "heldout") return false;
-  const index = data.experiences.findIndex((e) => e.columnId === column.id);
-  return index !== -1 && index <= row;
-}
-
-export function summarize(data: DashboardData): Summary {
-  const last = data.matrix.length - 1;
-
-  const trained = data.columns
-    .map((_, col) => col)
-    .filter((col) => isTrained(data, last, col));
-  const averageAccuracy = mean(trained.map((col) => data.matrix[last][col]));
-
-  const heldCol = data.columns.findIndex((c) => c.kind === "heldout");
-  const heldOut =
-    heldCol === -1
-      ? null
-      : { label: data.columns[heldCol].label, accuracy: data.matrix[last][heldCol] };
-
-  const perExperience = data.experiences.map((experience, row) => {
-    const col = data.columns.findIndex((c) => c.id === experience.columnId);
-    const learned = data.matrix[row][col];
-    const now = data.matrix[last][col];
-    return {
-      id: experience.id,
-      generator: experience.generator,
-      learned,
-      now,
-      change: now - learned,
-    };
+/** For each generator: accuracy right after it was learned vs after the last experience. */
+export function perGenerator(m: Metrics, key: "acc" | "ai_det"): GeneratorSummary[] {
+  const rows = m[key];
+  const last = rows.length - 1;
+  return m.experiences.map((e, i) => {
+    const col = m.classes.findIndex((c) => c.id === e.generator);
+    const learned = rows[i]?.[col] ?? 0;
+    const now = rows[last]?.[col] ?? 0;
+    return { id: e.generator, label: e.label, experience: e.id, learned, now, change: now - learned };
   });
-
-  const earlier = perExperience.slice(0, -1);
-  const bwt = earlier.length ? mean(earlier.map((p) => p.change)) : null;
-
-  return { averageAccuracy, heldOut, bwt, perExperience };
-}
-
-function wait(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
-    const timer = window.setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timer);
-        reject(new DOMException("Aborted", "AbortError"));
-      },
-      { once: true },
-    );
-  });
-}
-
-/** MOCK: made-up numbers in the shape of the project's accuracy matrix. */
-async function mockDashboard(signal?: AbortSignal): Promise<DashboardData> {
-  await wait(500, signal);
-  return {
-    columns: [
-      { id: "real", label: "Real", kind: "real" },
-      { id: "sd", label: "Stable Diffusion", kind: "generator" },
-      { id: "mj", label: "Midjourney", kind: "generator" },
-      { id: "dalle", label: "DALL-E", kind: "generator" },
-      { id: "flux", label: "FLUX", kind: "heldout" },
-    ],
-    experiences: [
-      { id: "E1", generator: "Stable Diffusion", columnId: "sd" },
-      { id: "E2", generator: "Midjourney", columnId: "mj" },
-      { id: "E3", generator: "DALL-E", columnId: "dalle" },
-    ],
-    matrix: [
-      [97, 96, 71, 64, 58],
-      [98, 95, 96, 74, 66],
-      [98, 93, 95, 94, 71],
-    ],
-    isMock: true,
-  };
-}
-
-export async function fetchDashboard(signal?: AbortSignal): Promise<DashboardData> {
-  // The backend has no endpoint for the accuracy matrix yet, so the dashboard
-  // keeps its demo data even when the Analyze page uses the real backend.
-  return mockDashboard(signal);
 }

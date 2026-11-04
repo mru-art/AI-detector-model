@@ -3,8 +3,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-import aioboto3
-from botocore.exceptions import ClientError
 
 BUCKETS: tuple[str, ...] = (
     "originals",
@@ -16,8 +14,12 @@ BUCKETS: tuple[str, ...] = (
 
 
 class ObjectStorage:
+    """S3/MinIO storage. Optional: it is only used when S3_ENDPOINT_URL or AWS
+    credentials are configured, so the detector runs without it."""
+
     def __init__(self) -> None:
-        self._session = aioboto3.Session()
+        self.enabled = bool(os.getenv("S3_ENDPOINT_URL") or os.getenv("S3_ACCESS_KEY_ID"))
+        self._session = None
         self._client_config: dict[str, Any] = {
             "service_name": "s3",
             "endpoint_url": os.getenv("S3_ENDPOINT_URL"),
@@ -28,10 +30,20 @@ class ObjectStorage:
 
     @asynccontextmanager
     async def client(self) -> AsyncIterator[Any]:
+        if not self.enabled:
+            raise RuntimeError("Object storage is not configured (set S3_ENDPOINT_URL).")
+        if self._session is None:
+            import aioboto3  # only needed when storage is used
+
+            self._session = aioboto3.Session()
         async with self._session.client(**self._client_config) as s3:
             yield s3
 
     async def ensure_buckets(self) -> None:
+        if not self.enabled:
+            return
+        from botocore.exceptions import ClientError
+
         async with self.client() as s3:
             for bucket in BUCKETS:
                 try:

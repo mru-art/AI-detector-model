@@ -1,8 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String
-from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -22,7 +21,7 @@ class Artwork(Base):
     )
 
     id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
     )
     artist_id: Mapped[str] = mapped_column(String, nullable=False)
     original_uri: Mapped[str] = mapped_column(String, nullable=False)
@@ -30,7 +29,7 @@ class Artwork(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
-    sha256: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    sha256: Mapped[str] = mapped_column(String, nullable=False)
 
     detections: Mapped[list["Detection"]] = relationship(
         back_populates="artwork",
@@ -47,10 +46,10 @@ class Detection(Base):
     )
 
     id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
     )
     artwork_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True),
+        Uuid(as_uuid=True),
         ForeignKey("artworks.id", ondelete="CASCADE"),
         nullable=False,
     )
