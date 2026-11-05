@@ -11,14 +11,14 @@ export default function ThemeToggle() {
       type="button"
       onClick={toggle}
       aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
-      className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-40 inline-flex -translate-x-1/2 cursor-pointer items-center gap-2 rounded-md bg-mist px-5 py-3 text-base font-bold transition-colors hover:bg-line"
+      className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center gap-2 rounded-md bg-mist px-4 text-base font-bold transition-colors hover:bg-line"
     >
       {dark ? (
         <Sun className="size-4" aria-hidden="true" />
       ) : (
         <Moon className="size-4" aria-hidden="true" />
       )}
-      {dark ? "Light" : "Dark"}
+      <span className="hidden sm:inline">{dark ? "Light" : "Dark"}</span>
     </button>
   );
 }

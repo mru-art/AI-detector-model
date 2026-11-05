@@ -1,3 +1,5 @@
+import { useLayoutEffect, useRef } from "react";
+import type { MouseEvent } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight } from "lucide-react";
 
@@ -42,19 +44,139 @@ const LIMITS = [
   "New generators keep appearing, so a result that was reliable last month may be less reliable today.",
 ];
 
+/**
+ * The big wordmark shrinks as you scroll and settles into the top bar,
+ * where it stays as the site logo. It is a fixed element whose font size and
+ * position follow the scroll until it docks. After that nothing changes, so it
+ * stays perfectly still. Real font sizes (no scaling) keep the text sharp.
+ * The header's own logo is hidden on this page meanwhile (index.css).
+ */
+function Hero() {
+  const heroRef = useRef<HTMLElement>(null);
+  const slotRef = useRef<HTMLDivElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+
+  useLayoutEffect(() => {
+    const hero = heroRef.current;
+    const slot = slotRef.current;
+    const heading = headingRef.current;
+    if (!hero || !slot || !heading) return;
+
+    const root = document.documentElement;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let big = 100;
+    let small = 30;
+    let slotTop = 0;
+    let targetTop = 20;
+    let distance = 1;
+    let frame = 0;
+    let lastSize = NaN;
+    let lastTop = NaN;
+    let lastProgress = NaN;
+
+    const update = () => {
+      frame = 0;
+      const y = Math.max(0, window.scrollY);
+      if (reduce) {
+        // No movement: just swap in the header logo once the hero is scrolled past.
+        if (y > distance * 0.6) root.removeAttribute("data-logo");
+        else root.setAttribute("data-logo", "hidden");
+        return;
+      }
+      const progress = Math.min(1, y / distance);
+      const eased = progress * progress * (3 - 2 * progress); // gentle start and landing
+      const size = Math.round(big * Math.pow(small / big, eased) * 100) / 100;
+      const top = Math.round(Math.max(targetTop, slotTop - y) * 100) / 100;
+      // Only touch the page when something actually changed (nothing does once docked).
+      if (size !== lastSize) {
+        heading.style.fontSize = `${size}px`;
+        lastSize = size;
+      }
+      if (top !== lastTop) {
+        heading.style.top = `${top}px`;
+        lastTop = top;
+      }
+      if (progress !== lastProgress) {
+        hero.style.setProperty("--p", String(progress));
+        lastProgress = progress;
+      }
+    };
+
+    const measure = () => {
+      const header = document.querySelector("header");
+      const headerHeight = header ? header.getBoundingClientRect().height : 68;
+      small = window.innerWidth >= 640 ? 30 : 24; // header logo size in px
+      big = Math.max(small, slot.getBoundingClientRect().width * 0.295);
+      if (reduce) {
+        heading.style.position = "static";
+        heading.style.fontSize = `${big}px`;
+        slot.style.height = "";
+      } else {
+        slot.style.height = `${big * 0.9}px`; // keeps the page layout steady
+      }
+      slotTop = slot.getBoundingClientRect().top + window.scrollY;
+      targetTop = headerHeight / 2 - 0.45 * small;
+      distance = Math.max(1, slotTop - targetTop);
+      lastSize = NaN;
+      lastTop = NaN;
+      lastProgress = NaN;
+      update();
+    };
+
+    const onScroll = () => {
+      if (!frame) frame = window.requestAnimationFrame(update);
+    };
+
+    root.setAttribute("data-logo", "hidden");
+    measure();
+    void document.fonts?.ready.then(measure);
+    const observer = new ResizeObserver(measure);
+    observer.observe(slot);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", measure);
+
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", measure);
+      observer.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+      root.removeAttribute("data-logo");
+    };
+  }, []);
+
+  const toTop = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.scrollTo({ top: 0, behavior: reduce ? "auto" : "smooth" });
+  };
+
+  return (
+    <section ref={heroRef} className="flex min-h-[62svh] flex-col justify-center">
+      <div ref={slotRef}>
+        <h1
+          ref={headingRef}
+          className="pointer-events-none fixed inset-x-0 z-[60] whitespace-nowrap text-center font-display leading-[0.9] tracking-tight"
+          style={{ top: "6rem", fontSize: "20vw" }}
+        >
+          <Link to="/" onClick={toTop} className="pointer-events-auto inline-block">
+            S.C.R.A.M
+          </Link>
+        </h1>
+      </div>
+      <p
+        className="mt-6 text-center text-sm font-bold uppercase tracking-widest text-muted sm:text-base"
+        style={{ opacity: "calc(1 - var(--p, 0) * 1.6)" }}
+      >
+        Spectral Classification, Replay and Art Masking
+      </p>
+    </section>
+  );
+}
+
 export default function Home() {
   return (
     <div className="flex flex-col gap-24">
-      <section className="flex min-h-[62svh] flex-col justify-center">
-        <div className="@container">
-          <h1 className="whitespace-nowrap text-center font-display text-[length:29.5cqw] leading-[0.9] tracking-tight">
-            S.C.R.A.M
-          </h1>
-        </div>
-        <p className="mt-6 text-center text-sm font-bold uppercase tracking-widest text-muted sm:text-base">
-          Spectral Classification, Replay and Art Masking
-        </p>
-      </section>
+      <Hero />
 
       <section className="grid gap-8 border-t border-line pt-10 md:grid-cols-[1.2fr_2fr]">
         <div>
