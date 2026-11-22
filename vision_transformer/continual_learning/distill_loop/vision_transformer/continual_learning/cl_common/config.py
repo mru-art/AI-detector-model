@@ -48,6 +48,10 @@ KD_TEMPERATURE = 2.0
 DISTILL_EXEMPLARS_PER_CLASS = 200   # old images kept per class (real + each generator); try 50 / 100 / 200 / 500
 DISTILL_EPOCHS = 3                  # epochs on the new generator's images + exemplars (after a head-only warm-up)
 
+# ------------------------------------------------------------------ distillation loop (distill_loop/)
+DISTILL_EXEMPLARS_PER_CLASS = 200   # old images kept per class (real + each generator)
+DISTILL_EPOCHS = 3                  # epochs on the new generator's images + exemplars 
+
 # ------------------------------------------------------------------ evaluation / output
 EVAL_SPLIT = "test"         # use "validation" while you are tuning the numbers above, "test" for final results
 EVAL_TTA = True             # test with 5 crops per image (4 corners + centre) and average them; same for every method
