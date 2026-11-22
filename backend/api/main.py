@@ -23,6 +23,7 @@ from ..database import create_tables, database_enabled, dispose_database
 from ..inference import detector
 from ..metrics import load_metrics
 from ..storage import storage
+from .cloak import router as cloak_router
 from .detections import MAX_UPLOAD_MB
 from .detections import router as detections_router
 from .evaluation import router as evaluation_router
@@ -66,6 +67,7 @@ app.add_middleware(
 
 app.include_router(detections_router)
 app.include_router(evaluation_router)
+app.include_router(cloak_router)
 if database_enabled() and storage.enabled:
     from .artworks import router as artworks_router
 

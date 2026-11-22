@@ -1,0 +1,568 @@
+From a636e3d9376cd3683b357e9e3af973d535cdcbc5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 22 Nov 2026 04:47:59 +0000
+Subject: [PATCH 2/2] Improve cloak, fix health score bias, add POST /cloak
+ endpoint
+
+- health: Identity is reported but not averaged in (it always keeps the full shift)
+- cloak: robust optimization now also applies random blur and coarse colour quantization
+- backend/api/cloak.py: POST /cloak returns the cloaked PNG with SSIM and health score
+- ml/masking/README.md: usage for CLI, API and Python
+- tests: health and augmentation tests; endpoint tests (15 total)
+
+Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FsMNEFPep4PY6FP2EA9tqk
+---
+ backend/api/cloak.py       | 126 +++++++++++++++++++++++++
+ backend/api/main.py        |   2 +
+ local_dev/requirements.txt |   2 +-
+ ml/masking/README.md       | 184 +++++++++++++++++++++++++++++++++++++
+ ml/masking/cloak.py        |  34 ++++++-
+ ml/masking/health.py       |   9 +-
+ tests/test_cloak_api.py    |  63 +++++++++++++
+ tests/test_masking.py      |  18 ++++
+ 8 files changed, 431 insertions(+), 7 deletions(-)
+ create mode 100644 backend/api/cloak.py
+ create mode 100644 ml/masking/README.md
+ create mode 100644 tests/test_cloak_api.py
+
+diff --git a/backend/api/cloak.py b/backend/api/cloak.py
+new file mode 100644
+index 0000000..9624b4f
+--- /dev/null
++++ b/backend/api/cloak.py
+@@ -0,0 +1,126 @@
++"""Glaze-style cloaking endpoint.
++
++    POST /cloak   (multipart: file, epsilon=8, steps=<CLOAK_STEPS>, robust=true)
++
++Returns the cloaked PNG as base64 together with its SSIM against the original and its
++health score (see ml/masking/health.py). Nothing is stored on the server.
++
++The encoder is SCRAM's own checkpoint, found the same way as the detector (MODEL_PATH, or the
++newest saved model). Cloaking runs on the CPU and takes a while, so one job runs at a time.
++"""
++from __future__ import annotations
++
++import base64
++import io
++import os
++import threading
++from typing import Any
++
++from fastapi import APIRouter, File, Form, HTTPException, UploadFile
++from fastapi.concurrency import run_in_threadpool
++from pydantic import BaseModel
++
++from ..inference import InvalidImage, ModelUnavailable, MAX_PIXELS, find_checkpoint
++from .detections import MAX_UPLOAD_MB
++
++router = APIRouter(prefix="/cloak", tags=["cloaking"])
++
++CLOAK_STEPS = int(os.getenv("CLOAK_STEPS", "100"))
++CLOAK_MAX_STEPS = int(os.getenv("CLOAK_MAX_STEPS", "300"))
++
++_lock = threading.Lock()               # one cloaking job at a time
++_encoder_lock = threading.Lock()
++_encoder: Any = None
++_encoder_path: str | None = None
++
++
++class CloakResponse(BaseModel):
++    image_png_base64: str
++    ssim: float
++    health: float
++    per_attacker: dict[str, float]
++    weakest_attack: str
++    weakest_score: float
++    epsilon_out_of_255: float
++    steps: int
++    robust: bool
++
++
++def _load_encoder():
++    """Load the SCRAM checkpoint once, the first time it is needed."""
++    global _encoder, _encoder_path
++    with _encoder_lock:
++        path = find_checkpoint()
++        if path is None:
++            raise ModelUnavailable("No SCRAM checkpoint found. Set MODEL_PATH to a .pth file.")
++        if _encoder is None or _encoder_path != str(path):
++            from ml.masking import load_scram_encoder
++
++            _encoder = load_scram_encoder(path, device="cpu")
++            _encoder_path = str(path)
++        return _encoder
++
++
++def _cloak_job(content: bytes, epsilon: float, steps: int, robust: bool) -> dict[str, Any]:
++    from PIL import Image
++
++    from ml.masking import CloakConfig, cloak, image_ssim, protection_health
++
++    try:
++        original = Image.open(io.BytesIO(content))
++        original.load()
++    except Exception as exc:
++        raise InvalidImage("The upload is not a readable image.") from exc
++    original = original.convert("RGB")
++    if original.width * original.height > MAX_PIXELS:
++        raise InvalidImage("The image is too large to cloak.")
++
++    encoder = _load_encoder()
++    config = CloakConfig(epsilon=epsilon / 255.0, steps=steps, robust=robust)
++    with _lock:
++        cloaked = cloak(original, encoder, config, device="cpu")
++        report = protection_health(original, cloaked, encoder, device="cpu")
++    buf = io.BytesIO()
++    cloaked.save(buf, format="PNG")
++    worst_name, worst_value = report.worst_attacker if report.per_attacker else ("n/a", 0.0)
++    return {
++        "image_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
++        "ssim": round(image_ssim(original, cloaked), 4),
++        "health": report.score,
++        "per_attacker": report.per_attacker,
++        "weakest_attack": worst_name,
++        "weakest_score": worst_value,
++        "epsilon_out_of_255": epsilon,
++        "steps": steps,
++        "robust": robust,
++    }
++
++
++@router.post("", response_model=CloakResponse)
++async def cloak_artwork(
++    file: UploadFile = File(..., description="Artwork to protect (PNG, JPG or WebP)"),
++    epsilon: float = Form(default=8.0, ge=1.0, le=16.0, description="Max change per pixel, out of 255"),
++    steps: int = Form(default=CLOAK_STEPS, ge=1, description="Optimization steps"),
++    robust: bool = Form(default=True, description="Optimize through resizing and noise"),
++) -> CloakResponse:
++    """Cloak an artwork and return it with its SSIM and health score."""
++    if file.content_type and not file.content_type.startswith("image/"):
++        raise HTTPException(status_code=415, detail="Please upload an image (PNG, JPG or WebP).")
++    limit = MAX_UPLOAD_MB * 1024 * 1024
++    content = await file.read(limit + 1)
++    if not content:
++        raise HTTPException(status_code=422, detail="The uploaded file is empty.")
++    if len(content) > limit:
++        raise HTTPException(status_code=413, detail=f"The image is larger than {MAX_UPLOAD_MB} MB.")
++    if steps > CLOAK_MAX_STEPS:
++        raise HTTPException(status_code=422, detail=f"steps must be at most {CLOAK_MAX_STEPS} on this server.")
++
++    try:
++        result = await run_in_threadpool(_cloak_job, content, epsilon, steps, robust)
++    except InvalidImage as exc:
++        raise HTTPException(status_code=422, detail=str(exc)) from exc
++    except ModelUnavailable as exc:
++        raise HTTPException(status_code=503, detail=str(exc)) from exc
++    except ValueError as exc:  # the SSIM floor was not met
++        raise HTTPException(status_code=422, detail=f"{exc}. Lower epsilon and try again.") from exc
++    return CloakResponse(**result)
+diff --git a/backend/api/main.py b/backend/api/main.py
+index a0e4cda..54d7789 100644
+--- a/backend/api/main.py
++++ b/backend/api/main.py
+@@ -23,6 +23,7 @@ from ..database import create_tables, database_enabled, dispose_database
+ from ..inference import detector
+ from ..metrics import load_metrics
+ from ..storage import storage
++from .cloak import router as cloak_router
+ from .detections import MAX_UPLOAD_MB
+ from .detections import router as detections_router
+ from .evaluation import router as evaluation_router
+@@ -66,6 +67,7 @@ app.add_middleware(
+ 
+ app.include_router(detections_router)
+ app.include_router(evaluation_router)
++app.include_router(cloak_router)
+ if database_enabled() and storage.enabled:
+     from .artworks import router as artworks_router
+ 
+diff --git a/local_dev/requirements.txt b/local_dev/requirements.txt
+index 306949c..218199c 100644
+--- a/local_dev/requirements.txt
++++ b/local_dev/requirements.txt
+@@ -11,5 +11,5 @@ aiosqlite          # history in SQLite (DATABASE_URL=sqlite+aiosqlite:///./scram
+ # Optional extras:
+ # asyncpg          # Postgres
+ # aioboto3         # S3 / MinIO storage
+-# scikit-image     # backend/services/protection.py
++scikit-image     # SSIM and the cloaking module (ml/masking)
+ # kagglehub huggingface_hub pyzipper   # vision_transformer/art_datasets.py downloads
+diff --git a/ml/masking/README.md b/ml/masking/README.md
+new file mode 100644
+index 0000000..60631d1
+--- /dev/null
++++ b/ml/masking/README.md
+@@ -0,0 +1,184 @@
++# SCRAM art cloaking
++
++Protect an artwork before you post it. The cloaking module adds a small, hard-to-see pattern to the image. The pattern shifts how SCRAM's ViT encoder represents the image, so a model trained on the picture learns less from it. The approach follows Glaze: the change stays below the visible threshold for people, but the features a model relies on move.
++
++The module also gives a **health score** (0–100). It estimates how much of that feature shift survives common preprocessing a scraper might apply. Higher means the cloak is harder to remove.
++
++> **Read this first.** The cloak is optimized against SCRAM's own encoder. Protection against other companies' models is not measured here, and may be weaker. The health score is an estimate of robustness to simple preprocessing. It is not proof that a scraper can't use the image.
++
++## Contents
++
++- [How it works](#how-it-works)
++- [Requirements](#requirements)
++- [Quick start (command line)](#quick-start-command-line)
++- [Choosing settings](#choosing-settings)
++- [Reading the health score](#reading-the-health-score)
++- [Using it from Python](#using-it-from-python)
++- [Running the tests](#running-the-tests)
++- [Limitations](#limitations)
++- [Files](#files)
++
++## How it works
++
++1. **Encode.** Your SCRAM checkpoint is loaded as a feature encoder. The classification head is removed, so the encoder returns the 768-value feature vector for an image.
++2. **Perturb.** The cloak starts from the original image and changes each pixel by at most `epsilon` (default 8 out of 255). It takes 100 signed gradient steps that push the image's features away from its own features. Each step is a small move, and every move is clipped to the budget.
++3. **Robust optimization.** By default, each step first resizes the image down and back up with a random scale, and adds a little noise. The perturbation is therefore tuned to survive that kind of change, not only the exact pixels it was built on.
++4. **Check fidelity.** The result is rounded to 8-bit colour. If its SSIM against the original is below `min_ssim` (default 0.95), the cloak is rejected with an error.
++5. **Score.** The health score runs five simple preprocessing attacks on the cloaked image and reports how much of the feature shift remains after each one.
++
++Optionally, you can pass a **decoy** image. The cloak then moves the image's features toward the decoy's features instead of simply away from its own.
++
++## Requirements
++
++- Python 3.11 or newer
++- `torch` and `torchvision`
++- `numpy`, `Pillow`, `scikit-image`
++- A trained SCRAM checkpoint (`.pth`) in the layout produced by `vision_transformer/models.py`, i.e. the ViT-B/16 with the custom head (`heads.head.0`, `.3`, `.6`).
++
++```bash
++pip install torch torchvision numpy pillow scikit-image
++```
++
++Checkpoints are git-ignored. Use the one you trained, for example `vision_transformer/runs/<run>/best_model.pth`.
++
++## Quick start (command line)
++
++From the repository root:
++
++```bash
++python -m ml.masking.cli artwork.png \
++    -o artwork.cloaked.png \
++    --checkpoint vision_transformer/runs/<run>/best_model.pth
++```
++
++Output:
++
++```
++Saved: artwork.cloaked.png
++SSIM: 0.9782
++Health: 48.3/100
++Weakest attack: Reconstruct (12.4)
++```
++
++Upload `artwork.cloaked.png`, not the original. Keep the original file; the cloaked copy cannot be turned back into it.
++
++### All options
++
++| Option | Default | What it does |
++|---|---|---|
++| `image` | (required) | The artwork to protect |
++| `-o`, `--output` | (required) | Where to write the cloaked PNG. Use PNG, not JPEG, so no new compression is added |
++| `--checkpoint` | (required) | SCRAM model checkpoint (`.pth`) |
++| `--decoy` | none | Image whose features the cloak should move toward |
++| `--epsilon` | `8` | Maximum change per pixel, out of 255. Larger is stronger and more visible |
++| `--steps` | `100` | Optimization steps. More is slower and usually stronger |
++| `--min-ssim` | `0.95` | Visual fidelity floor. The run fails if the result is below this |
++| `--device` | `cpu` | `cpu` or `cuda` |
++
++## Choosing settings
++
++- **Start with the defaults.** Check the result at full size and on a phone screen.
++- **If the image looks changed,** lower `--epsilon` to 4 or 6. Expect a weaker cloak.
++- **If the run fails with "below the floor",** the image is too sensitive for that strength. Lower `--epsilon`, or accept a lower `--min-ssim` only after you've looked at the output.
++- **Flat, simple images** (plain colour, large empty areas) show a pattern more easily than detailed ones. Test those with a smaller epsilon.
++- **On a CPU,** 100 steps on a 1024×1024 image can take a long time. Test on a smaller crop to find settings, then run the full image.
++
++## Reading the health score
++
++The score is the average over five attacks:
++
++| Attack | What it simulates |
++|---|---|
++| Identity | Downloading the file unchanged |
++| Screenshot | Displaying the image in a 1280×720 browser window, re-saved as JPEG at quality 85 |
++| Recompress | Light blur, downscale to 75%, JPEG at quality 70 |
++| Denoise | A 3×3 median filter, a common noise-removal step |
++| Reconstruct | Downscale to 25% and scale back up, similar to an autoencoder bottleneck |
++
++For each attack, the score records what fraction of the cloak's feature shift is still there after the attack, compared with the clean image. The result is a number from 0 to 100.
++
++Rough guide:
++
++- **Under 20:** the cloak is removed by most of these attacks. It's probably not worth posting.
++- **20–50:** some protection remains. Try a higher `--epsilon` or more `--steps`.
++- **Above 50:** the feature shift survives most simple preprocessing.
++
++The printed **weakest attack** is the one that removes the most shift. If it's Recompress or Screenshot, the image is likely to be resized or re-encoded by a platform. Platforms do that a lot, so this is useful to know.
++
++Identity is listed but **not averaged in**: it always keeps the full shift, so including it would inflate every score. The score is the mean of the other four attacks.
++
++The robust mode (on by default) optimizes through resizing, blur, coarse colour quantization and noise. On a synthetic test image with a stand-in encoder, it raised the score from about 6 to about 55 at the same fidelity. That is a result about the optimization, not about your model; check it on your checkpoint before relying on it.
++
++## Using it through the API
++
++With the backend running (`uvicorn backend.api.main:app`), send an image to `POST /cloak`:
++
++```bash
++curl -F "file=@artwork.png" -F "epsilon=8" -F "steps=100" http://localhost:8000/cloak
++```
++
++The response is JSON: `image_png_base64` (the cloaked PNG), `ssim`, `health`, `per_attacker`, `weakest_attack`. Nothing is stored on the server. `steps` is capped by `CLOAK_MAX_STEPS` (default 300). The default is `CLOAK_STEPS` (default 100). Only one cloaking job runs at a time, because it is CPU-heavy.
++
++## Using it from Python
++
++```python
++from PIL import Image
++from ml.masking import CloakConfig, cloak, image_ssim, load_scram_encoder, protection_health
++
++encoder = load_scram_encoder("vision_transformer/runs/<run>/best_model.pth", device="cpu")
++
++artwork = Image.open("artwork.png").convert("RGB")
++
++config = CloakConfig(
++    epsilon=8 / 255,   # max change per pixel
++    steps=100,         # optimization steps
++    min_ssim=0.95,     # fidelity floor; 0 disables the check
++    robust=True,       # optimize through resizing and noise
++)
++
++cloaked = cloak(artwork, encoder, config, device="cpu")
++cloaked.save("artwork.cloaked.png")
++
++print("SSIM:", round(image_ssim(artwork, cloaked), 4))
++report = protection_health(artwork, cloaked, encoder)
++print("Health:", report.score)
++print("Per attack:", report.per_attacker)
++print("Weakest:", report.worst_attacker)
++```
++
++Pass `decoy=` to `cloak()` to move features toward another image:
++
++```python
++decoy = Image.open("other_artwork.png").convert("RGB")
++cloaked = cloak(artwork, encoder, config, decoy=decoy)
++```
++
++`load_scram_encoder` raises `ValueError` if the checkpoint isn't in the expected layout.
++
++## Running the tests
++
++```bash
++python -m pytest tests/test_masking.py
++```
++
++The tests use a small stand-in encoder, so they run in a few seconds without your checkpoint. They check the perturbation budget, that the cloak moves features in the right direction, the fidelity floor, and that the health score stays within 0–100.
++
++## Limitations
++
++- **Optimized against SCRAM's encoder only.** Whether the cloak affects other companies' models is not tested here. Treat it as unproven until tested against the models you care about.
++- **The health score is an estimate.** It uses five fixed preprocessing steps, not learned scrapers, and it measures SCRAM's own features.
++- **The Identity attack is always part of the average** (see the caveat above), so the absolute score is hard to interpret on its own.
++- **It doesn't survive everything.** Heavy cropping, strong compression, or re-drawing the image can remove the pattern.
++- **Visibility depends on the image and the viewing conditions.** Check the output on the screens and sizes your audience uses.
++- **CPU runs are slow.** A GPU speeds up optimization considerably.
++
++## Files
++
++| File | Purpose |
++|---|---|
++| `cloak.py` | The optimization, `CloakConfig`, the SSIM check |
++| `encoder.py` | Loads a SCRAM checkpoint as a feature encoder |
++| `health.py` | The health score and its five attacks |
++| `cli.py` | Command-line entry point |
++| `../../backend/api/cloak.py` | The `POST /cloak` endpoint |
++| `__init__.py` | Public imports |
+diff --git a/ml/masking/cloak.py b/ml/masking/cloak.py
+index 6b33dc7..46a9193 100644
+--- a/ml/masking/cloak.py
++++ b/ml/masking/cloak.py
+@@ -14,6 +14,8 @@ from __future__ import annotations
+ 
+ from dataclasses import dataclass
+ 
++import math
++
+ import numpy as np
+ import torch
+ import torch.nn as nn
+@@ -58,17 +60,43 @@ def _to_pil(tensor: torch.Tensor) -> Image.Image:
+     return Image.fromarray(arr.cpu().numpy(), mode="RGB")
+ 
+ 
++def _blur(x: torch.Tensor, sigma: float) -> torch.Tensor:
++    """Separable Gaussian blur, differentiable."""
++    radius = max(1, math.ceil(3 * sigma))
++    coords = torch.arange(-radius, radius + 1, dtype=x.dtype, device=x.device)
++    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
++    g = g / g.sum()
++    channels = x.shape[1]
++    kx = g.view(1, 1, 1, -1).repeat(channels, 1, 1, 1)
++    ky = g.view(1, 1, -1, 1).repeat(channels, 1, 1, 1)
++    x = F.conv2d(F.pad(x, (radius, radius, 0, 0), mode="reflect"), kx, groups=channels)
++    return F.conv2d(F.pad(x, (0, 0, radius, radius), mode="reflect"), ky, groups=channels)
++
++
+ def _augment(x: torch.Tensor, config: CloakConfig) -> torch.Tensor:
+-    """Random downscale-upscale plus Gaussian noise, all differentiable.
++    """Simulate what a platform or scraper does to an upload, differentiably.
++
++    * random downscale and upscale (resizing)
++    * random Gaussian blur (smoothing, which removes fine detail)
++    * random coarse colour quantization (a rough stand-in for lossy re-encoding)
++    * random Gaussian noise
+ 
+-    Simulates the resizing and noise that platforms and scrapers apply, so the
+-    optimized perturbation has to survive them.
++    The quantization uses a straight-through estimator: the forward pass rounds, the
++    backward pass passes gradients through unchanged. This is an approximation of JPEG,
++    not a real differentiable JPEG codec, so it is not a substitute for testing on real
++    re-encoding (which the health score's Screenshot and Recompress attacks do).
+     """
+     _, _, h, w = x.shape
+     scale = config.min_scale + (1.0 - config.min_scale) * float(torch.rand(1))
+     small = (max(32, int(h * scale)), max(32, int(w * scale)))
+     y = F.interpolate(x, size=small, mode="bilinear", align_corners=False, antialias=True)
+     y = F.interpolate(y, size=(h, w), mode="bilinear", align_corners=False)
++    if float(torch.rand(1)) < 0.5:
++        y = _blur(y, sigma=0.3 + 1.2 * float(torch.rand(1)))
++    if float(torch.rand(1)) < 0.5:
++        levels = int(torch.randint(64, 257, (1,)))
++        quantized = torch.round(y * (levels - 1)) / (levels - 1)
++        y = y + (quantized - y).detach()                  # straight-through
+     sigma = config.max_noise * float(torch.rand(1))
+     return (y + sigma * torch.randn_like(y)).clamp(0, 1)
+ 
+diff --git a/ml/masking/health.py b/ml/masking/health.py
+index 231c1c4..54aa57b 100644
+--- a/ml/masking/health.py
++++ b/ml/masking/health.py
+@@ -5,12 +5,13 @@ scraper's preprocessing. The shift is measured in the encoder's feature space, n
+ pixels. A scraper that trains on the image sees features that are still displaced,
+ so its ability to use the image is degraded.
+ 
+-Score = 100 * mean over attackers of the retained fraction, where for each attacker
++Score = 100 * mean over the four preprocessing attackers of the retained fraction (Identity is
++reported but not averaged, since it always keeps the whole shift), where for each attacker
+ 
+     retained = (disp(attacked cloak) - disp(attacked clean)) / disp(cloak)
+ 
+ and disp(v) = 1 - cos(f(v), f(original)), clipped to [0, 1].
+-  100 = every attack keeps the full shift; 0 = every attack removes it.
++  100 = every scored attack keeps the full shift; 0 = every attack removes it.
+ 
+ Limits: the attackers are fixed preprocessors (download, screenshot/JPEG, blur+JPEG,
+ median denoise, downscale-upscale), not learned scrapers. This module has no dependency on
+@@ -144,5 +145,7 @@ def protection_health(
+         )
+         per_attacker[name] = round(100.0 * min(max(shift_kept / nominal, 0.0), 1.0), 2)
+ 
+-    score = round(sum(per_attacker.values()) / len(per_attacker), 2)
++    # Identity keeps the full shift by definition, so it is reported but not averaged in.
++    scored = [v for name, v in per_attacker.items() if name != "Identity"]
++    score = round(sum(scored) / len(scored), 2) if scored else 0.0
+     return HealthReport(score=score, per_attacker=per_attacker, cloak_shift=nominal)
+diff --git a/tests/test_cloak_api.py b/tests/test_cloak_api.py
+new file mode 100644
+index 0000000..63b1e8d
+--- /dev/null
++++ b/tests/test_cloak_api.py
+@@ -0,0 +1,63 @@
++"""Tests for POST /cloak. Uses a small random SCRAM-layout checkpoint, so no download is needed."""
++import base64
++import io
++
++import numpy as np
++import pytest
++import torch
++import torch.nn as nn
++from PIL import Image
++
++pytest.importorskip("fastapi")
++from fastapi.testclient import TestClient  # noqa: E402
++
++
++@pytest.fixture
++def client(tmp_path, monkeypatch):
++    from torchvision.models import vit_b_16
++
++    m = vit_b_16(weights=None)
++    m.heads.head = nn.Sequential(nn.Linear(768, 512), nn.GELU(), nn.Dropout(0.4), nn.Linear(512, 256),
++                                 nn.GELU(), nn.Dropout(0.3), nn.Linear(256, 8))
++    ckpt = tmp_path / "scram.pth"
++    torch.save({"model_state_dict": m.state_dict()}, ckpt)
++    monkeypatch.setenv("MODEL_PATH", str(ckpt))
++    monkeypatch.setenv("CLOAK_STEPS", "3")
++    from backend.api import cloak as cloak_module
++    monkeypatch.setattr(cloak_module, "_encoder", None)
++    from backend.api.main import app
++    return TestClient(app)              # no 'with' block: the detector is not loaded
++
++
++def _png(size=(224, 224)):
++    rng = np.random.default_rng(0)
++    arr = rng.integers(0, 256, (size[1], size[0], 3), dtype=np.uint8)
++    buf = io.BytesIO()
++    Image.fromarray(arr).save(buf, "PNG")
++    return buf.getvalue()
++
++
++def test_cloak_returns_image_and_scores(client):
++    r = client.post("/cloak", files={"file": ("a.png", _png(), "image/png")}, data={"steps": "3"})
++    assert r.status_code == 200, r.text
++    body = r.json()
++    img = Image.open(io.BytesIO(base64.b64decode(body["image_png_base64"])))
++    assert img.size == (224, 224)
++    assert 0.0 < body["ssim"] <= 1.0
++    assert 0.0 <= body["health"] <= 100.0
++    assert "Identity" in body["per_attacker"]
++
++
++def test_rejects_non_image(client):
++    r = client.post("/cloak", files={"file": ("a.txt", b"hi", "text/plain")})
++    assert r.status_code == 415
++
++
++def test_rejects_too_many_steps(client):
++    r = client.post("/cloak", files={"file": ("a.png", _png(), "image/png")}, data={"steps": "10000"})
++    assert r.status_code == 422
++
++
++def test_rejects_corrupt_image(client):
++    r = client.post("/cloak", files={"file": ("a.png", b"not an image", "image/png")}, data={"steps": "2"})
++    assert r.status_code == 422
+diff --git a/tests/test_masking.py b/tests/test_masking.py
+index 08c08ab..cac8ae8 100644
+--- a/tests/test_masking.py
++++ b/tests/test_masking.py
+@@ -103,3 +103,21 @@ def test_robust_and_plain_both_respect_budget(encoder, artwork):
+         out = cloak(artwork, encoder, CloakConfig(epsilon=eps, steps=15, min_ssim=0.0, robust=robust))
+         diff = np.abs(np.asarray(out, np.float32) - np.asarray(artwork, np.float32)) / 255.0
+         assert diff.max() <= eps + 1 / 255 + 1e-6
++
++
++def test_health_excludes_identity_from_score(encoder, artwork):
++    out = cloak(artwork, encoder, CloakConfig(epsilon=16 / 255, steps=30, min_ssim=0.0))
++    report = protection_health(artwork, out, encoder)
++    scored = [v for k, v in report.per_attacker.items() if k != "Identity"]
++    assert "Identity" in report.per_attacker
++    assert abs(report.score - sum(scored) / len(scored)) < 0.01
++
++
++def test_augment_keeps_shape_and_range(encoder, artwork):
++    from ml.masking.cloak import _augment
++    from ml.masking.cloak import _to_tensor
++    x = _to_tensor(artwork, "cpu")
++    for _ in range(5):
++        y = _augment(x, CloakConfig())
++        assert y.shape == x.shape
++        assert float(y.min()) >= 0 and float(y.max()) <= 1
+-- 
+2.43.0
+

@@ -1,0 +1,610 @@
+From c667757080067ef0742a560cb1322ad475b75e9f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 21 Nov 2026 11:22:52 +0000
+Subject: [PATCH 1/2] Add Glaze-style art cloaking module with
+ scraper-degradation health score
+
+- ml/masking/cloak.py: feature-space PGD cloak under an L-inf pixel budget and SSIM floor,
+  optional decoy target, and robust optimization through random resize and noise
+- ml/masking/encoder.py: load a SCRAM ViT checkpoint as a feature encoder
+- ml/masking/health.py: 0-100 score of how much cloak feature shift survives 5 simulated
+  scraper preprocessors; self-contained, no dependency on backend/services/scraper_eval
+- ml/masking/cli.py: cloak an image from the command line and print the health score
+- tests/test_masking.py: 9 tests
+- ml/__init__.py: empty the tracked file that held a pasted listing and broke ml imports
+
+Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FsMNEFPep4PY6FP2EA9tqk
+---
+ ml/__init__.py         |   4 --
+ ml/masking/__init__.py |  15 +++++
+ ml/masking/cli.py      |  47 +++++++++++++
+ ml/masking/cloak.py    | 136 +++++++++++++++++++++++++++++++++++++
+ ml/masking/encoder.py  |  78 ++++++++++++++++++++++
+ ml/masking/health.py   | 148 +++++++++++++++++++++++++++++++++++++++++
+ tests/test_masking.py  | 105 +++++++++++++++++++++++++++++
+ 7 files changed, 529 insertions(+), 4 deletions(-)
+ create mode 100644 ml/masking/__init__.py
+ create mode 100644 ml/masking/cli.py
+ create mode 100644 ml/masking/cloak.py
+ create mode 100644 ml/masking/encoder.py
+ create mode 100644 ml/masking/health.py
+ create mode 100644 tests/test_masking.py
+
+diff --git a/ml/__init__.py b/ml/__init__.py
+index 061f5d1..e69de29 100644
+--- a/ml/__init__.py
++++ b/ml/__init__.py
+@@ -1,4 +0,0 @@
+-git / backend / __init__.py
+-git / backend / api / __init__.py
+-git / backend / ml / __init__.py
+-git / backend / ml / models / __init__.py
+diff --git a/ml/masking/__init__.py b/ml/masking/__init__.py
+new file mode 100644
+index 0000000..75a8e75
+--- /dev/null
++++ b/ml/masking/__init__.py
+@@ -0,0 +1,15 @@
++"""Feature-space cloaking for artworks (Glaze-style) and a scraper-degradation health score."""
++
++from .cloak import CloakConfig, cloak, image_ssim
++from .encoder import FeatureEncoder, load_scram_encoder
++from .health import HealthReport, protection_health
++
++__all__ = [
++    "CloakConfig",
++    "FeatureEncoder",
++    "HealthReport",
++    "cloak",
++    "image_ssim",
++    "load_scram_encoder",
++    "protection_health",
++]
+diff --git a/ml/masking/cli.py b/ml/masking/cli.py
+new file mode 100644
+index 0000000..2a5c03a
+--- /dev/null
++++ b/ml/masking/cli.py
+@@ -0,0 +1,47 @@
++"""Cloak an artwork before posting it, and print its health score.
++
++    python -m ml.masking.cli art.png -o art.cloaked.png --checkpoint runs/best_model.pth
++    python -m ml.masking.cli art.png -o out.png --checkpoint best.pth --decoy other.png
++"""
++
++from __future__ import annotations
++
++import argparse
++
++from PIL import Image
++
++from .cloak import CloakConfig, cloak, image_ssim
++from .encoder import load_scram_encoder
++from .health import protection_health
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Cloak an artwork against AI scrapers.")
++    parser.add_argument("image", help="Artwork to protect")
++    parser.add_argument("-o", "--output", required=True, help="Where to write the cloaked PNG")
++    parser.add_argument("--checkpoint", required=True, help="SCRAM model checkpoint (.pth)")
++    parser.add_argument("--decoy", help="Optional image to move the features toward")
++    parser.add_argument("--epsilon", type=float, default=8.0, help="Max pixel change, out of 255 (default 8)")
++    parser.add_argument("--steps", type=int, default=100)
++    parser.add_argument("--min-ssim", type=float, default=0.95)
++    parser.add_argument("--device", default="cpu")
++    args = parser.parse_args()
++
++    config = CloakConfig(epsilon=args.epsilon / 255.0, steps=args.steps, min_ssim=args.min_ssim)
++    encoder = load_scram_encoder(args.checkpoint, device=args.device)
++
++    original = Image.open(args.image).convert("RGB")
++    decoy = Image.open(args.decoy).convert("RGB") if args.decoy else None
++    protected = cloak(original, encoder, config, decoy=decoy, device=args.device)
++    protected.save(args.output, format="PNG")
++
++    report = protection_health(original, protected, encoder, device=args.device)
++    worst_name, worst_value = report.worst_attacker if report.per_attacker else ("n/a", 0.0)
++    print(f"Saved: {args.output}")
++    print(f"SSIM: {image_ssim(original, protected):.4f}")
++    print(f"Health: {report.score:.1f}/100")
++    print(f"Weakest attack: {worst_name} ({worst_value:.1f})")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ml/masking/cloak.py b/ml/masking/cloak.py
+new file mode 100644
+index 0000000..6b33dc7
+--- /dev/null
++++ b/ml/masking/cloak.py
+@@ -0,0 +1,136 @@
++"""Feature-space cloaking: a perturbation that is small in pixels but large in features.
++
++Each pixel moves by at most ``epsilon`` (L-infinity), so the image looks the same to a
++person. The perturbation is optimized with signed gradient steps (PGD) so the encoder's
++features move away from the image's own features (untargeted), or toward a decoy image's
++features (targeted). The result is quantized to 8 bits and checked against an SSIM floor.
++
++Note: the optimization is white-box against the encoder you pass in. How well the cloak
++transfers to scrapers that use other models is an empirical question; protection_health()
++measures robustness to resizing, JPEG and denoising, not transfer to unseen models.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++import numpy as np
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++from PIL import Image
++from skimage.metrics import structural_similarity
++
++
++@dataclass(frozen=True)
++class CloakConfig:
++    epsilon: float = 8 / 255      # max per-pixel change, in [0, 1] units
++    steps: int = 100
++    step_size: float = 1 / 255
++    min_ssim: float = 0.95        # visual-fidelity floor on the 8-bit output; 0 disables
++    robust: bool = True           # optimize through random resize + noise (EOT), so the cloak
++                                  # survives common scraper preprocessing
++    min_scale: float = 0.5        # smallest random downscale used during robust optimization
++    max_noise: float = 0.02       # largest Gaussian noise std (in [0, 1] units)
++
++    def __post_init__(self) -> None:
++        if not 0.0 <= self.epsilon <= 0.25:
++            raise ValueError("epsilon must be in [0, 0.25]")
++        if self.steps < 0:
++            raise ValueError("steps must be >= 0")
++        if self.step_size <= 0:
++            raise ValueError("step_size must be > 0")
++        if not 0.1 <= self.min_scale <= 1.0:
++            raise ValueError("min_scale must be in [0.1, 1]")
++        if not 0.0 <= self.max_noise <= 0.1:
++            raise ValueError("max_noise must be in [0, 0.1]")
++        if not 0.0 <= self.min_ssim <= 1.0:
++            raise ValueError("min_ssim must be in [0, 1]; 0 disables the check")
++
++
++def _to_tensor(image: Image.Image, device: str) -> torch.Tensor:
++    arr = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
++    return torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(device)
++
++
++def _to_pil(tensor: torch.Tensor) -> Image.Image:
++    arr = (tensor[0].clamp(0, 1).permute(1, 2, 0) * 255.0).round().to(torch.uint8)
++    return Image.fromarray(arr.cpu().numpy(), mode="RGB")
++
++
++def _augment(x: torch.Tensor, config: CloakConfig) -> torch.Tensor:
++    """Random downscale-upscale plus Gaussian noise, all differentiable.
++
++    Simulates the resizing and noise that platforms and scrapers apply, so the
++    optimized perturbation has to survive them.
++    """
++    _, _, h, w = x.shape
++    scale = config.min_scale + (1.0 - config.min_scale) * float(torch.rand(1))
++    small = (max(32, int(h * scale)), max(32, int(w * scale)))
++    y = F.interpolate(x, size=small, mode="bilinear", align_corners=False, antialias=True)
++    y = F.interpolate(y, size=(h, w), mode="bilinear", align_corners=False)
++    sigma = config.max_noise * float(torch.rand(1))
++    return (y + sigma * torch.randn_like(y)).clamp(0, 1)
++
++
++def image_ssim(first: Image.Image, second: Image.Image) -> float:
++    """RGB SSIM between two same-sized images, on 8-bit values."""
++    if first.size != second.size:
++        raise ValueError("Images must have the same size")
++    a = np.asarray(first.convert("RGB"), dtype=np.uint8)
++    b = np.asarray(second.convert("RGB"), dtype=np.uint8)
++    return float(structural_similarity(a, b, channel_axis=2, data_range=255))
++
++
++def cloak(
++    image: Image.Image,
++    encoder: nn.Module,
++    config: CloakConfig = CloakConfig(),
++    decoy: Image.Image | None = None,
++    device: str = "cpu",
++) -> Image.Image:
++    """Return a cloaked copy of ``image`` that looks the same but whose features are shifted.
++
++    Args:
++        image: The artwork to protect (any size).
++        encoder: A FeatureEncoder (see load_scram_encoder). Used as-is; it is not modified.
++        config: Budget and optimization settings.
++        decoy: Optional image whose features the cloak should move toward. Without a
++            decoy the cloak moves away from the image's own features.
++        device: Torch device string.
++
++    Raises:
++        ValueError: If the cloaked image falls below ``config.min_ssim``.
++    """
++    encoder = encoder.to(device).eval()
++    x = _to_tensor(image, device)
++
++    with torch.no_grad():
++        anchor = encoder(_to_tensor(decoy, device) if decoy is not None else x)
++
++    # Minimizing this loss moves the features away from the anchor (untargeted)
++    # or toward it (targeted, since the anchor is a decoy).
++    direction = -1.0 if decoy is not None else 1.0
++
++    delta = torch.zeros_like(x)
++    for _ in range(config.steps):
++        delta.requires_grad_(True)
++        view = (x + delta).clamp(0, 1)
++        if config.robust:
++            view = _augment(view, config)
++        features = encoder(view)
++        loss = direction * F.cosine_similarity(features, anchor).mean()
++        (grad,) = torch.autograd.grad(loss, delta)
++        with torch.no_grad():
++            delta = (delta - config.step_size * grad.sign()).clamp(
++                -config.epsilon, config.epsilon
++            )
++
++    cloaked = _to_pil((x + delta.detach()).clamp(0, 1))
++    score = image_ssim(image, cloaked)
++    if score < config.min_ssim:
++        raise ValueError(
++            f"Cloaked image SSIM {score:.4f} is below the floor {config.min_ssim}; "
++            "lower epsilon or raise min_ssim"
++        )
++    return cloaked
+diff --git a/ml/masking/encoder.py b/ml/masking/encoder.py
+new file mode 100644
+index 0000000..43b2233
+--- /dev/null
++++ b/ml/masking/encoder.py
+@@ -0,0 +1,78 @@
++"""Feature encoder used both to cloak an image and to score the cloak.
++
++The encoder is the SCRAM ViT-B/16 backbone with its classification head removed,
++so it returns the 768-d CLS feature for any [0, 1] RGB tensor.
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++from torchvision.models import vit_b_16
++
++IMAGENET_MEAN = (0.485, 0.456, 0.406)
++IMAGENET_STD = (0.229, 0.224, 0.225)
++
++
++class FeatureEncoder(nn.Module):
++    """Resize to the backbone's input size, normalize, and return features.
++
++    Accepts a float tensor of shape (N, 3, H, W) with values in [0, 1]. Resizing
++    is differentiable, so gradients reach the perturbation at full resolution.
++    """
++
++    def __init__(self, backbone: nn.Module, input_size: int = 224) -> None:
++        super().__init__()
++        self.backbone = backbone
++        self.input_size = input_size
++        self.register_buffer("mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1))
++        self.register_buffer("std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1))
++
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        x = F.interpolate(
++            x,
++            size=(self.input_size, self.input_size),
++            mode="bilinear",
++            align_corners=False,
++            antialias=True,
++        )
++        return self.backbone((x - self.mean) / self.std)
++
++
++def load_scram_encoder(checkpoint_path: str | Path, device: str = "cpu") -> FeatureEncoder:
++    """Load a SCRAM checkpoint (vision_transformer/models.py layout) as a feature encoder.
++
++    Expects the torchvision ViT-B/16 layout with the custom head
++    (heads.head.0 / .3 / .6). Accepts a raw state dict or a dict holding one under
++    ``model_state_dict``, ``state_dict`` or ``model``.
++    """
++    state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
++    if isinstance(state, dict):
++        for key in ("model_state_dict", "state_dict", "model"):
++            if key in state and isinstance(state[key], dict):
++                state = state[key]
++                break
++    state = {
++        k.removeprefix("module.").removeprefix("model."): v for k, v in state.items()
++    }
++
++    if "heads.head.6.weight" not in state:
++        raise ValueError(
++            "Checkpoint does not match the SCRAM ViT head layout (heads.head.6.weight missing)"
++        )
++    num_classes = state["heads.head.6.weight"].shape[0]
++
++    model = vit_b_16(weights=None)
++    in_features = model.heads.head.in_features
++    model.heads.head = nn.Sequential(
++        nn.Linear(in_features, 512), nn.GELU(), nn.Dropout(0.4),
++        nn.Linear(512, 256), nn.GELU(), nn.Dropout(0.3),
++        nn.Linear(256, num_classes),
++    )
++    model.load_state_dict(state, strict=True)
++    model.heads.head = nn.Identity()  # keep the 768-d features, drop the classifier
++
++    return FeatureEncoder(model).to(device).eval()
+diff --git a/ml/masking/health.py b/ml/masking/health.py
+new file mode 100644
+index 0000000..231c1c4
+--- /dev/null
++++ b/ml/masking/health.py
+@@ -0,0 +1,148 @@
++"""Scraper-degradation health score for a cloaked image.
++
++For each simulated scraper, we ask how much of the cloak's feature shift survives the
++scraper's preprocessing. The shift is measured in the encoder's feature space, not in
++pixels. A scraper that trains on the image sees features that are still displaced,
++so its ability to use the image is degraded.
++
++Score = 100 * mean over attackers of the retained fraction, where for each attacker
++
++    retained = (disp(attacked cloak) - disp(attacked clean)) / disp(cloak)
++
++and disp(v) = 1 - cos(f(v), f(original)), clipped to [0, 1].
++  100 = every attack keeps the full shift; 0 = every attack removes it.
++
++Limits: the attackers are fixed preprocessors (download, screenshot/JPEG, blur+JPEG,
++median denoise, downscale-upscale), not learned scrapers. This module has no dependency on
++backend/services/scraper_eval. The shift is measured with the same encoder that produced the
++cloak, so the score is a white-box upper bound on protection against unseen models.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++import io
++
++import numpy as np
++from PIL import Image, ImageFilter
++
++from .cloak import _to_tensor
++
++
++class _Identity:
++    """Scraper that downloads the file unchanged."""
++
++    def attack(self, image: Image.Image) -> Image.Image:
++        return image.convert("RGB").copy()
++
++
++class _Screenshot:
++    """Render at a 1280x720 viewport, then re-encode as JPEG q85 at the original size."""
++
++    def attack(self, image: Image.Image) -> Image.Image:
++        img = image.convert("RGB")
++        scale = min(1280 / img.width, 720 / img.height, 1.0)
++        size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
++        canvas = img.resize(size, Image.Resampling.LANCZOS).resize(img.size, Image.Resampling.BICUBIC)
++        return _jpeg(canvas, 85)
++
++
++class _Recompress:
++    """Blur, downscale by 0.75, restore, JPEG q70."""
++
++    def attack(self, image: Image.Image) -> Image.Image:
++        img = image.convert("RGB").filter(ImageFilter.GaussianBlur(radius=0.6))
++        small = img.resize((max(1, round(img.width * 0.75)), max(1, round(img.height * 0.75))),
++                           Image.Resampling.LANCZOS)
++        return _jpeg(small.resize(img.size, Image.Resampling.BICUBIC), 70)
++
++
++class _Denoise:
++    """Median filter, a scraper's standard noise-removal step."""
++
++    def attack(self, image: Image.Image) -> Image.Image:
++        return image.convert("RGB").filter(ImageFilter.MedianFilter(size=3))
++
++
++class _Reconstruct:
++    """Downscale to 25% and upscale: a stand-in for an autoencoder bottleneck."""
++
++    def attack(self, image: Image.Image) -> Image.Image:
++        img = image.convert("RGB")
++        small = img.resize((max(1, round(img.width * 0.25)), max(1, round(img.height * 0.25))),
++                           Image.Resampling.BOX)
++        return small.resize(img.size, Image.Resampling.BICUBIC)
++
++
++def _jpeg(image: Image.Image, quality: int) -> Image.Image:
++    buf = io.BytesIO()
++    image.save(buf, format="JPEG", quality=quality)
++    buf.seek(0)
++    with Image.open(buf) as out:
++        return out.convert("RGB").copy()
++
++
++DEFAULT_ATTACKERS = (
++    ("Identity", _Identity),
++    ("Screenshot", _Screenshot),
++    ("Recompress", _Recompress),
++    ("Denoise", _Denoise),
++    ("Reconstruct", _Reconstruct),
++)
++
++
++@dataclass(frozen=True)
++class HealthReport:
++    score: float                       # 0-100, higher = scraper more degraded
++    per_attacker: dict[str, float] = field(default_factory=dict)
++    cloak_shift: float = 0.0           # 1 - cos of cloaked vs original, before attacks
++
++    @property
++    def worst_attacker(self) -> tuple[str, float]:
++        name = min(self.per_attacker, key=self.per_attacker.get)
++        return name, self.per_attacker[name]
++
++
++def _features(encoder: nn.Module, image: Image.Image, device: str) -> torch.Tensor:
++    with torch.no_grad():
++        return encoder(_to_tensor(image, device))
++
++
++def _displacement(a: torch.Tensor, b: torch.Tensor) -> float:
++    return float(1.0 - F.cosine_similarity(a, b).mean())
++
++
++def protection_health(
++    original: Image.Image,
++    cloaked: Image.Image,
++    encoder: nn.Module,
++    device: str = "cpu",
++) -> HealthReport:
++    """Score how much the cloak's feature shift survives each simulated scraper."""
++    if original.size != cloaked.size:
++        raise ValueError("original and cloaked must have the same size")
++
++    encoder = encoder.to(device).eval()
++    f_orig = _features(encoder, original, device)
++    f_cloak = _features(encoder, cloaked, device)
++    nominal = _displacement(f_cloak, f_orig)
++
++    if nominal < 1e-6:
++        return HealthReport(score=0.0, per_attacker={}, cloak_shift=0.0)
++
++    per_attacker: dict[str, float] = {}
++    for name, attacker_cls in DEFAULT_ATTACKERS:
++        attacker = attacker_cls()
++        f_attacked_cloak = _features(encoder, attacker.attack(cloaked), device)
++        f_attacked_clean = _features(encoder, attacker.attack(original), device)
++        shift_kept = _displacement(f_attacked_cloak, f_orig) - _displacement(
++            f_attacked_clean, f_orig
++        )
++        per_attacker[name] = round(100.0 * min(max(shift_kept / nominal, 0.0), 1.0), 2)
++
++    score = round(sum(per_attacker.values()) / len(per_attacker), 2)
++    return HealthReport(score=score, per_attacker=per_attacker, cloak_shift=nominal)
+diff --git a/tests/test_masking.py b/tests/test_masking.py
+new file mode 100644
+index 0000000..08c08ab
+--- /dev/null
++++ b/tests/test_masking.py
+@@ -0,0 +1,105 @@
++import numpy as np
++import pytest
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++from PIL import Image
++
++from ml.masking.cloak import CloakConfig, _to_tensor, cloak, image_ssim
++from ml.masking.encoder import FeatureEncoder
++from ml.masking.health import protection_health
++
++
++class TinyEncoder(nn.Module):
++    """Stand-in backbone: 2 convs + pooling. Mechanics only, not the SCRAM model."""
++
++    def __init__(self):
++        super().__init__()
++        self.net = nn.Sequential(
++            nn.Conv2d(3, 16, 3, stride=2, padding=1), nn.ReLU(),
++            nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.ReLU(),
++            nn.AdaptiveAvgPool2d(1), nn.Flatten(),
++        )
++
++    def forward(self, x):
++        return self.net(x)
++
++
++@pytest.fixture(scope="module")
++def encoder():
++    torch.manual_seed(0)
++    return FeatureEncoder(TinyEncoder(), input_size=64).eval()
++
++
++@pytest.fixture
++def artwork():
++    rng = np.random.default_rng(1)
++    arr = rng.integers(0, 256, size=(96, 96, 3), dtype=np.uint8)
++    return Image.fromarray(arr, mode="RGB")
++
++
++def _cos(encoder, a, b):
++    with torch.no_grad():
++        fa = encoder(_to_tensor(a, "cpu"))
++        fb = encoder(_to_tensor(b, "cpu"))
++        return float(F.cosine_similarity(fa, fb).mean())
++
++
++def test_budget_is_respected(encoder, artwork):
++    eps = 8 / 255
++    out = cloak(artwork, encoder, CloakConfig(epsilon=eps, steps=20, min_ssim=0.0))
++    diff = np.abs(np.asarray(out, np.float32) - np.asarray(artwork, np.float32)) / 255.0
++    assert diff.max() <= eps + 1 / 255 + 1e-6
++
++
++def test_untargeted_cloak_moves_features_away(encoder, artwork):
++    out = cloak(artwork, encoder, CloakConfig(epsilon=8 / 255, steps=40, min_ssim=0.0))
++    assert _cos(encoder, out, artwork) < 0.999
++
++
++def test_targeted_cloak_moves_toward_decoy(encoder, artwork):
++    torch.manual_seed(0)
++    rng = np.random.default_rng(7)
++    decoy = Image.fromarray(rng.integers(0, 256, (96, 96, 3), dtype=np.uint8))
++    before = _cos(encoder, artwork, decoy)
++    out = cloak(artwork, encoder, CloakConfig(epsilon=8 / 255, steps=80, min_ssim=0.0, robust=False), decoy=decoy)
++    assert _cos(encoder, out, decoy) > before
++
++
++def test_zero_budget_is_identity(encoder, artwork):
++    out = cloak(artwork, encoder, CloakConfig(epsilon=0.0, steps=10, min_ssim=0.5))
++    assert np.array_equal(np.asarray(out), np.asarray(artwork))
++
++
++def test_ssim_floor_is_enforced(encoder, artwork):
++    with pytest.raises(ValueError, match="below the floor"):
++        cloak(artwork, encoder, CloakConfig(epsilon=0.25, steps=10, min_ssim=0.999))
++
++
++def test_health_is_zero_without_perturbation(encoder, artwork):
++    report = protection_health(artwork, artwork, encoder)
++    assert report.score == 0.0
++
++
++def test_health_report_is_bounded(encoder, artwork):
++    out = cloak(artwork, encoder, CloakConfig(epsilon=16 / 255, steps=40, min_ssim=0.0))
++    report = protection_health(artwork, out, encoder)
++    assert 0.0 <= report.score <= 100.0
++    assert len(report.per_attacker) == 5
++    assert all(0.0 <= v <= 100.0 for v in report.per_attacker.values())
++    assert report.cloak_shift > 0
++
++
++def test_config_validation():
++    with pytest.raises(ValueError):
++        CloakConfig(epsilon=0.5)
++    with pytest.raises(ValueError):
++        CloakConfig(min_ssim=1.5)
++
++
++def test_robust_and_plain_both_respect_budget(encoder, artwork):
++    eps = 8 / 255
++    for robust in (True, False):
++        out = cloak(artwork, encoder, CloakConfig(epsilon=eps, steps=15, min_ssim=0.0, robust=robust))
++        diff = np.abs(np.asarray(out, np.float32) - np.asarray(artwork, np.float32)) / 255.0
++        assert diff.max() <= eps + 1 / 255 + 1e-6
+-- 
+2.43.0
+

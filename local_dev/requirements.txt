@@ -11,5 +11,5 @@ aiosqlite          # history in SQLite (DATABASE_URL=sqlite+aiosqlite:///./scram
 # Optional extras:
 # asyncpg          # Postgres
 # aioboto3         # S3 / MinIO storage
-# scikit-image     # backend/services/protection.py
+scikit-image     # SSIM and the cloaking module (ml/masking)
 # kagglehub huggingface_hub pyzipper   # vision_transformer/art_datasets.py downloads
